@@ -1,3 +1,5 @@
 numpy==2.3.0
-posggym==0.6.0
 torch==2.7.1+cu118
+lbforaging==2.0.0
+
+
