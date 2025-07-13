@@ -4,7 +4,8 @@ import gymnasium as gym
 
 import argparse
 import time
-import copy
+
+import wrappers
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default="model", help="path to the model file")
@@ -26,7 +27,6 @@ parser.add_argument("--epochs", type=int, default=2, help="number of epochs per 
 parser.add_argument("--lr", type=float, default=3e-4, help="number of steps in the env per update")
 parser.add_argument("--gamma", type=float, default=0.99, help="number of steps in the env per update")
 parser.add_argument("--lambd", type=float, default=0.95, help="gae trace lambda")
-parser.add_argument("--tau", type=float, default=0.01, help="gae trace lambda")
 parser.add_argument("--clip_eps", type=float, default=0.25, help="ppo clip")
 parser.add_argument("--entropy_reg", type=float, default=0.05, help="entropy regularization")
 parser.add_argument("--clip_grad_norm", type=float, default=10000., help="gradient clipping")
@@ -133,7 +133,6 @@ class Agent:
         self._clip_eps = args.clip_eps
         self._entropy_reg = args.entropy_reg
         self._clip_grad_norm = args.clip_grad_norm
-        self._tau = args.tau
 
         self._actor = new_network(
             env.observation_space.shape[0],  # type: ignore
@@ -141,7 +140,7 @@ class Agent:
             (args.players, 6),
             args.hidden_size
         ).to(self.device)
-        torch_init_with_orthogonal_and_zeros(self._actor)
+        self._actor.apply(torch_init_with_orthogonal_and_zeros)
         # with torch.no_grad():
             # self._actor[-2].weight.mul_(0.01)
 
@@ -151,8 +150,7 @@ class Agent:
             (1,),
             args.hidden_size
         ).to(self.device)
-        torch_init_with_orthogonal_and_zeros(self._critic)
-        self._target_critic = copy.deepcopy(self._critic).to(self.device)
+        self._critic.apply(torch_init_with_orthogonal_and_zeros)
 
         self._params = [*self._actor.parameters(), *self._critic.parameters()]
 
@@ -167,12 +165,11 @@ class Agent:
         probs = torch.softmax(logits, -1)
         return probs.cpu().numpy()
 
-    def predict_values(self, states: np.ndarray, target: bool = False) -> np.ndarray:
+    def predict_values(self, states: np.ndarray) -> np.ndarray:
         t_states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        critic = self._target_critic if target else self._critic
-        critic.eval()
+        self._critic.eval()
         with torch.inference_mode():
-            return critic(t_states).cpu().numpy()
+            return self._critic(t_states).cpu().numpy()
 
     def _prepare_data(self, buffer: TrajectoryBuffer) -> tuple[np.ndarray, ...]:
         advantages, returns = compute_gae_and_ret(self, buffer, self._gamma, self._lambd)
@@ -236,13 +233,6 @@ class Agent:
         # torch.nn.utils.clip_grad_norm_(self._params, self._clip_grad_norm)
         with torch.no_grad():
             self._opt.step()
-        self.target_critic_update()
-
-    def target_critic_update(self) -> None:
-        with torch.no_grad():
-            for source_param, target_param in zip(self._critic.parameters(), self._target_critic.parameters()):
-                target_param.mul_(1 - self._tau)
-                target_param.add_(source_param, alpha=self._tau)
 
 
 
@@ -255,7 +245,7 @@ def compute_gae_and_ret(
     gaes = np.empty_like(buffer.rewards)
     returns = np.empty_like(buffer.rewards)
 
-    values_ext = agent.predict_values(buffer.extended_states(), True)  # todo: target jen pro kritika
+    values_ext = agent.predict_values(buffer.extended_states())
     values = values_ext[:-1]
     v_last = values_ext[-1]
 
@@ -263,11 +253,14 @@ def compute_gae_and_ret(
     v_next = v_last
     for t in range(len(gaes) - 1, -1, -1):
         v = values[t]
+
         adv = buffer.rewards[t] + ~buffer.dones[t] * gamma * v_next - v
         gae = adv + gamma * lambd * gae
 
         gaes[t] = gae
         returns[t] = gae + v
+
+        v_next = v
     return gaes, returns
 
 
@@ -298,15 +291,9 @@ def evaluate_episode(agent: Agent, env: gym.Env, render: bool) -> float:
         # print(probs)
         action = probs.argmax(-1)
 
-        # print(inverse_oh(state))
-        # env.render()
-        # input()
-
         state, reward, terminated, truncated, _ = env.step(action)
         ret += float(reward)
         # print(probs, reward)
-        # if reward > 0:
-            # input()
         done = terminated or truncated
 
         _render()
@@ -327,7 +314,6 @@ def main(args: argparse.Namespace) -> None:
     train_env = gym.vector.AsyncVectorEnv(
         [lambda: gym.make("LBF") for _ in range(args.num_envs)]
     )
-    # train_env = NpWrapper(train_env)
 
     agent = Agent(args, eval_env)
     buffer = TrajectoryBuffer()
@@ -346,7 +332,7 @@ def main(args: argparse.Namespace) -> None:
 
             dones = terminations | truncations
             values = agent.predict_values(states)
-            actions_probs = np.take_along_axis(probs, actions[..., None], axis=-1).squeeze().prod(-1)
+            actions_probs = np.take_along_axis(probs, actions[..., None], axis=-1).squeeze(-1).prod(-1)
 
             buffer.append(states, actions, actions_probs, rewards, dones, values, next_states, prev_dones)
 
@@ -362,95 +348,6 @@ def main(args: argparse.Namespace) -> None:
             mean_return = evaluate(agent, eval_env, args.eval_for, args.render_each)
             print(f"{mean_return:.3f}")
 
-class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
-    def __init__(self, env):
-        gym.utils.RecordConstructorArgs.__init__(self)
-        super().__init__(env)
-        # self._observation_space = gym.spaces.MultiBinary(
-            # [(args.players + args.foods) * (args.env_size * 2 + args.players + 1)]
-        # )
-        self._observation_space = gym.spaces.Box(
-            np.zeros((args.players + args.foods) * 3, dtype=np.float32),
-            np.array([args.env_size, args.env_size, args.players] * (args.players + args.foods), dtype=np.float32),
-        )
-        self._action_space = gym.spaces.MultiDiscrete([6]*args.players)
-
-    def _full_observation_tripples(self, obs: tuple[np.ndarray, ...]) -> np.ndarray:
-        """Original observation is a tuple of flattened tripples (row, col, level):
-        food 1, food 2, ..., food F, agent i, other agents' positions...
-
-        Returns: ndarray (foods + players, 3)
-
-        Already eaten food is reprezented by zeros.
-        We support only fully observable version of the environment.
-        """
-        foods = obs[0].astype(np.int64).reshape(-1, 3)[:args.foods]
-        padded_foods = np.zeros([args.foods, 3], dtype=np.int64)
-        padded_foods[:len(foods)] = foods
-        positions = np.array([ob.astype(np.int64).reshape(-1, 3)[args.foods] for ob in obs])
-        new_obs = np.concat([padded_foods, positions], axis=0)
-        return new_obs
-
-    def _three_hot_observation(self, obs: np.ndarray) -> np.ndarray:
-        """Makes three-hot reprezentation.
-        Transforms each value in the tripplet into one-hot encoding.
-
-        Returns: ndarray, ((foods + players), (env_size * 2 + players))
-        """
-        new_obs = np.zeros(((args.foods + args.players), (args.env_size * 2 + args.players + 1)), dtype=np.int64)
-        _rang = np.arange(args.foods + args.players)
-        new_obs[_rang, obs[:, 0]] = 1
-        new_obs[_rang, args.env_size + obs[:, 1]] = 1
-        new_obs[_rang, 2*args.env_size + obs[:, 2]] = 1
-        return new_obs
-
-    def observation(self, obs):
-        new_obs = self._full_observation_tripples(obs)
-
-        new_obs = new_obs.astype(np.float64)
-        new_obs[:, :2] /= args.env_size
-        new_obs[:, 2] /= args.players
-
-        # new_obs = self._three_hot_observation(new_obs)
-        new_obs = new_obs.reshape(-1)
-        return new_obs
-
-    def reset(self, *, seed=None, options=None):
-        obs, info = super().reset(seed=seed, options=options)
-        return self.observation(obs), info
-
-    def step(self, action):
-        # original env wants tuple instead of ndarray, well done
-        tuple_action = tuple(a.item() for a in action)
-
-        obs, rewards, terminated, truncated, info = super().step(tuple_action)
-        obs = self.observation(obs)
-        reward = np.sum(rewards)  # type: ignore
-        return obs, reward, terminated, truncated, info
-        
-
-
-# class NpWrapper(gym.vector.VectorWrapper):
-    # """Vectorization returns list of ndarrays for some reason"""
-    # def __init__(self, env):
-        # super().__init__(env)
-
-    # def reset(self, *, seed=None, options=None):
-        # new_obs, info = super().reset(seed=seed, options=options)
-        # return np.asarray(new_obs), info
-
-    # def step(self, actions):
-        # obs, rewards, terminations, truncations, info = super().step(actions)
-        # obs = np.asarray(obs)
-
-        # # Since we will do cooperation only let's average.
-        # # I have no interest in inspecting what the actual rewards are.
-        # rewards = np.asarray(rewards).mean(-1)
-
-        # terminations = np.asarray(terminations)
-        # truncations = np.asarray(truncations)
-
-        # return obs, rewards, terminations, truncations, info
 
 
 # python main.py --env_size 8 --players 2 --foods 3 --steps_per_update 10 --batch_size 10 --tau 0.01 --lr 3e-4 --epochs 4 --hidden_size 128 --entropy_reg 0.001 --clip_eps 0.2 --num_envs 10 --eval_each 1000 --eval_for 10
@@ -460,7 +357,10 @@ if __name__ == "__main__":
         id="LBF",
         entry_point="lbforaging.foraging:ForagingEnv",
         disable_env_checker=True,
-        additional_wrappers=(NpWrapper.wrapper_spec(),),
+        additional_wrappers=(
+            wrappers.NpWrapper.wrapper_spec(args=args),
+            # wrappers.RewardShapingWrapper.wrapper_spec(args=args)
+        ),
         kwargs={
             "players": args.players,
             "min_player_level": np.ones(args.players),
