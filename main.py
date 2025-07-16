@@ -9,26 +9,26 @@ import wrappers
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default="model", help="path to the model file")
-parser.add_argument("--hidden_size", type=int, default=50, help="size of hidden layer")
-parser.add_argument("--num_envs", type=int, default=64, help="number of parallel training envs")
-parser.add_argument("--ep_limit", type=int, default=20, help="number of parallel training envs")
+parser.add_argument("--hidden_size", type=int, default=128, help="size of hidden layer")
+parser.add_argument("--num_envs", type=int, default=128, help="number of parallel training envs")
+parser.add_argument("--ep_limit", type=int, default=32, help="number of parallel training envs")
 parser.add_argument("--eval_each", type=int, default=100, help="evaluation period")
 parser.add_argument("--eval_for", type=int, default=10, help="number of eval_episodes")
 parser.add_argument("--render_each", type=int, default=10, help="render eval eps")
 
 parser.add_argument("--env_size", type=int, default=5, help="size of the envirnonment")
-parser.add_argument("--players", type=int, default=3, help="number of players")
-parser.add_argument("--foods", type=int, default=2, help="number of players")
+parser.add_argument("--players", type=int, default=1, help="number of players")
+parser.add_argument("--foods", type=int, default=1, help="number of players")
 
 parser.add_argument("--train_steps", type=int, default=1_000_000, help="number of training steps")
-parser.add_argument("--steps_per_update", type=int, default=10, help="number of steps in the env per update")
+parser.add_argument("--steps_per_update", type=int, default=32, help="number of steps in the env per update")
 parser.add_argument("--batch_size", type=int, default=32, help="size of a single batch")
 parser.add_argument("--epochs", type=int, default=2, help="number of epochs per training")
-parser.add_argument("--lr", type=float, default=3e-4, help="number of steps in the env per update")
+parser.add_argument("--lr", type=float, default=0.0001, help="learning rate")
 parser.add_argument("--gamma", type=float, default=0.99, help="number of steps in the env per update")
 parser.add_argument("--lambd", type=float, default=0.95, help="gae trace lambda")
-parser.add_argument("--clip_eps", type=float, default=0.25, help="ppo clip")
-parser.add_argument("--entropy_reg", type=float, default=0.05, help="entropy regularization")
+parser.add_argument("--clip_eps", type=float, default=0.15, help="ppo clip")
+parser.add_argument("--entropy_reg", type=float, default=0.001, help="entropy regularization")
 parser.add_argument("--clip_grad_norm", type=float, default=10000., help="gradient clipping")
 
 
@@ -154,7 +154,7 @@ class Agent:
 
         self._params = [*self._actor.parameters(), *self._critic.parameters()]
 
-        self._opt = torch.optim.Adam(self._params, args.lr)
+        self._opt = torch.optim.Adam(self._params, args.lr, eps=1e-5)
         self._critic_loss = torch.nn.MSELoss()
 
     def predict_probs(self, states: np.ndarray) -> np.ndarray:
@@ -176,11 +176,23 @@ class Agent:
         data = buffer.states, buffer.actions, buffer.action_probs, advantages, returns
         prev_dones = buffer.get_prev_dones()
 
+        # print()
+        # print("rewards", np.array(buffer.rewards)[:, 0])
+        # print("returns", returns[:, 0])
+        # print("advantages", advantages[:, 0])
+        # print("e dones", buffer.extended_dones()[:, 0])
+        # print("p dones", prev_dones[:, 0])
+        # exit()
+
         prep_data = tuple([] for _ in data)
         for t in range(len(data[0])):
             prev_not_dones = ~prev_dones[t]
             for prep_d, d in zip(prep_data, data):
                 prep_d.extend(d[t][prev_not_dones])
+
+        # print(np.array(data[0]).shape)
+        # print(np.array(prep_data[-1]))
+        # exit()
         return tuple(map(np.array, prep_data))
 
 
@@ -188,6 +200,9 @@ class Agent:
         for epoch in range(epochs):
             data = self._prepare_data(buffer)
             data_size = len(data[0])
+            for d in data:
+                print(d.shape)
+            exit()
             
             indices = np.random.permutation(data_size)
             for b in range(0, data_size - batch_size + 1, batch_size):
@@ -207,6 +222,8 @@ class Agent:
         t_actions_probs = torch.as_tensor(actions_probs, dtype=torch.float32, device=self.device)
         t_advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
         t_returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
+
+        t_advantages = (t_advantages - t_advantages.mean()) / (t_advantages.std() + 1e-8)
 
         self._actor.train()
         self._critic.train()
@@ -255,10 +272,16 @@ def compute_gae_and_ret(
         v = values[t]
 
         adv = buffer.rewards[t] + ~buffer.dones[t] * gamma * v_next - v
-        gae = adv + gamma * lambd * gae
+        # print(f"[{t}] adv = {adv[0]} = {buffer.rewards[t][0]} + {~buffer.dones[t][0]} * {gamma} * {v_next[0]} - {v[0]}")
+        gae = adv + ~buffer.dones[t] * gamma * lambd * gae
 
         gaes[t] = gae
         returns[t] = gae + v
+        print(f"[{t}] ret = {(gae + v)}")
+
+        # if buffer.dones[t][0] and buffer.rewards[t][0] == 0 and t < args.ep_limit - 1:
+            # print(buffer.states[t][0].reshape(2, -1))
+            # print(buffer.states[t + 1][0].reshape(2, -1))
 
         v_next = v
     return gaes, returns
@@ -286,10 +309,29 @@ def evaluate_episode(agent: Agent, env: gym.Env, render: bool) -> float:
 
     done = False
     ret = 0
+
+    # steps = 0
+    # food = state
+
     while not done:
+        # steps += 1
         probs = agent.predict_probs(state[None])[0]
         # print(probs)
         action = probs.argmax(-1)
+
+        row = state.reshape(2, -1)[1][:args.env_size].argmax()
+        col = state.reshape(2, -1)[1][args.env_size : args.env_size * 2].argmax()
+        up = row == 0
+        down = row == args.env_size - 1
+        left = col == 0
+        right = col == args.env_size - 1
+        in_corner = (up or down) and (left or right)
+
+        if in_corner:
+            a = 2 if up else 1
+        else:
+            a = 5
+        action =  np.full(args.players, a)
 
         state, reward, terminated, truncated, _ = env.step(action)
         ret += float(reward)
@@ -300,6 +342,7 @@ def evaluate_episode(agent: Agent, env: gym.Env, render: bool) -> float:
         # print(action)
         # print(state.reshape(-1, 3))
         # input()
+    # print(f"steps: {steps}, return: {ret}, {food}")
     return ret
 
 def evaluate(agent: Agent, env: gym.Env, episodes: int, render_each: int) -> float:
@@ -325,7 +368,25 @@ def main(args: argparse.Namespace) -> None:
     for train_step in range(1, args.train_steps + 1):
         buffer.clear()
         for update_step in range(1, args.steps_per_update + 1):
+
+            # def fn(name, item):
+                # print(name)
+                # print("    pos:", item[:args.env_size].argmax().item(), item[args.env_size:2*args.env_size].argmax().item())
+                # print("    lvl:", item[2*args.env_size:].argmax().item())
+
+            # ss = states[0].reshape(args.foods+args.players, -1)
+            # fs = ss[:args.foods]
+            # ps = ss[args.foods:]
+            # for i in range(args.foods):
+                # fn(f"food {i}", fs[i])
+            # for i in range(args.players):
+                # fn(f"player {i}", ps[i])
+            # train_env.envs[0].render()
+            # input()
+            # exit()
+
             probs = agent.predict_probs(states)
+            # print(probs[0])
             actions = torch.distributions.Categorical(torch.as_tensor(probs)).sample().numpy()
 
             next_states, rewards, terminations, truncations, _ = train_env.step(actions)
@@ -335,6 +396,8 @@ def main(args: argparse.Namespace) -> None:
             actions_probs = np.take_along_axis(probs, actions[..., None], axis=-1).squeeze(-1).prod(-1)
 
             buffer.append(states, actions, actions_probs, rewards, dones, values, next_states, prev_dones)
+
+
 
             states = next_states
             prev_dones = dones
