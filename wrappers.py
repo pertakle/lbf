@@ -6,6 +6,7 @@ class RewardShapingWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
     def __init__(self, env, args):
         gym.utils.RecordConstructorArgs.__init__(self)
         super().__init__(env)
+        assert not args.three_hot
         self._args = args
         self._last_distances = np.zeros(args.players + args.foods)
 
@@ -43,17 +44,18 @@ class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
         super().__init__(env)
         self._args = args
 
-        # 3-hot
-        self._observation_space = gym.spaces.MultiBinary(
-            [(self._args.players + self._args.foods) * (self._args.env_size * 2 + self._args.players + 1)]
-        )
-
-        # tripplets
-        # self._observation_space = gym.spaces.Box(
-            # np.zeros((self._args.players + self._args.foods) * 3, dtype=np.float32),
-            # np.array([1, 1, 1] * (self._args.players + self._args.foods), dtype=np.float32),  # normalized
-            # # np.array([self._args.env_size, self._args.env_size, self._args.players] * (self._args.players + self._args.foods), dtype=np.float32),
-        # )
+        if args.three_hot:
+            # 3-hot
+            self._observation_space = gym.spaces.MultiBinary(
+                [(self._args.players + self._args.foods) * (self._args.env_size * 2 + self._args.players + 1)]
+            )
+        else:
+            # tripplets
+            self._observation_space = gym.spaces.Box(
+                np.zeros((self._args.players + self._args.foods) * 3, dtype=np.float32),
+                np.array([1, 1, 1] * (self._args.players + self._args.foods), dtype=np.float32),  # normalized
+                # np.array([self._args.env_size, self._args.env_size, self._args.players] * (self._args.players + self._args.foods), dtype=np.float32),
+            )
         self._action_space = gym.spaces.MultiDiscrete([6]*self._args.players)
 
     def _full_observation_tripples(self, obs: tuple[np.ndarray, ...]) -> np.ndarray:
@@ -88,15 +90,15 @@ class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
 
     def observation(self, obs):
         new_obs = self._full_observation_tripples(obs)
-        # print(new_obs)
 
-        # new_obs = new_obs.astype(np.float64)
-        # new_obs[:, :2] /= self._args.env_size
-        # new_obs[:, 2] /= self._args.players
+        if self._args.three_hot:
+            new_obs = self._three_hot_observation(new_obs)
+        else:
+            # normalization
+            new_obs = new_obs.astype(np.float64)
+            new_obs[:, :2] /= self._args.env_size
+            new_obs[:, 2] /= self._args.players
 
-        new_obs = self._three_hot_observation(new_obs)
-        # print(new_obs)
-        # print()
         new_obs = new_obs.reshape(-1)
         return new_obs
 
@@ -113,4 +115,72 @@ class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
         reward = np.sum(rewards)  # type: ignore
         return obs, reward, terminated, truncated, info
         
+
+class LivePlotWrapper(gym.Wrapper):
+    def __init__(self, env, plot_each):
+        import matplotlib.pyplot as plt
+
+        super().__init__(env)
+
+        assert plot_each > 0
+        self._plot_each = plot_each
+        self._return = 0
+        self._returns = np.zeros(plot_each)
+        self._ret_index = 0
+
+        self._episode_means = []
+        self._episode_minus_stds = []
+        self._episode_plus_stds = []
+        self._mean_ep_indices = []
+
+        self._figure, self._axis = plt.subplots()
+        self._figure.show()
+
+    def _update_plot(self):
+        self._axis.cla()
+        self._axis.fill_between(
+            self._mean_ep_indices,
+            self._episode_minus_stds,
+            self._episode_plus_stds,
+            alpha=0.2
+        )
+        self._axis.plot(self._mean_ep_indices, self._episode_means)
+        self._axis.set_xlabel("Episode")
+        self._axis.set_ylabel("Return")
+        self._axis.grid(True)
+        self._figure.canvas.draw()
+        self._figure.canvas.flush_events()
+
+    def _add_return(self):
+        self._returns[self._ret_index] = self._return
+        self._ret_index += 1
+        self._return = 0
+
+        if self._ret_index == self._plot_each:
+            mean = self._returns.mean()
+            std = self._returns.std()
+
+            self._mean_ep_indices.append(len(self._episode_means))
+            self._episode_means.append(mean)
+            self._episode_minus_stds.append(mean - std)
+            self._episode_plus_stds.append(mean + std)
+
+            self._ret_index = 0
+            self._update_plot()
+
+    def reset(self, *args, **kwargs):
+        self._return = 0
+        return self.env.reset(*args, **kwargs)
+
+    def step(self, action):
+        transition = self.env.step(action)
+        _, reward, terminated, truncated, _ = transition
+        self._return += float(reward)
+        if terminated or truncated:
+            self._add_return()
+        return transition
+
+    def save_figure(self, fname, *args, **kwargs):
+        """See `plt.savefig` for arguments description."""
+        self._figure.savefig(fname, *args, **kwargs)
 

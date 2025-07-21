@@ -1,0 +1,4 @@
+numpy==2.3.0
+torch==2.7.1
+lbforaging==2.0.0
+

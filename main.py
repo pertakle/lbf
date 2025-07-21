@@ -9,27 +9,32 @@ import wrappers
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default="model", help="path to the model file")
-parser.add_argument("--hidden_size", type=int, default=128, help="size of hidden layer")
-parser.add_argument("--num_envs", type=int, default=128, help="number of parallel training envs")
-parser.add_argument("--ep_limit", type=int, default=32, help="number of parallel training envs")
-parser.add_argument("--eval_each", type=int, default=100, help="evaluation period")
-parser.add_argument("--eval_for", type=int, default=10, help="number of eval_episodes")
-parser.add_argument("--render_each", type=int, default=10, help="render eval eps")
+parser.add_argument("--hidden_size", type=int, default=0, help="size of hidden layer")
+parser.add_argument("--num_envs", type=int, default=8, help="number of parallel training envs")
+parser.add_argument("--ep_limit", type=int, default=3, help="number of parallel training envs")
+parser.add_argument("--eval_each", type=int, default=1000, help="evaluation period")
+parser.add_argument("--eval_for", type=int, default=100, help="number of eval_episodes")
+parser.add_argument("--render_each", type=int, default=50, help="render eval eps")
 
-parser.add_argument("--env_size", type=int, default=5, help="size of the envirnonment")
+parser.add_argument("--env_size", type=int, default=3, help="size of the envirnonment")
 parser.add_argument("--players", type=int, default=1, help="number of players")
 parser.add_argument("--foods", type=int, default=1, help="number of players")
 
 parser.add_argument("--train_steps", type=int, default=1_000_000, help="number of training steps")
-parser.add_argument("--steps_per_update", type=int, default=32, help="number of steps in the env per update")
-parser.add_argument("--batch_size", type=int, default=32, help="size of a single batch")
+parser.add_argument("--steps_per_update", type=int, default=10, help="number of steps in the env per update")
+parser.add_argument("--batch_size", type=int, default=16, help="size of a single batch")
 parser.add_argument("--epochs", type=int, default=2, help="number of epochs per training")
-parser.add_argument("--lr", type=float, default=0.0001, help="learning rate")
+parser.add_argument("--lr", type=float, default=0.0003, help="learning rate")
 parser.add_argument("--gamma", type=float, default=0.99, help="number of steps in the env per update")
 parser.add_argument("--lambd", type=float, default=0.95, help="gae trace lambda")
-parser.add_argument("--clip_eps", type=float, default=0.15, help="ppo clip")
+parser.add_argument("--clip_eps", type=float, default=0.25, help="ppo clip")
 parser.add_argument("--entropy_reg", type=float, default=0.001, help="entropy regularization")
-parser.add_argument("--clip_grad_norm", type=float, default=10000., help="gradient clipping")
+parser.add_argument("--clip_grad_norm", type=float, default=10., help="gradient clipping")
+
+parser.add_argument("--three_hot", action="store_true", default=False, help="uses three-hot states")
+parser.add_argument("--reward_shaping", action="store_true", default=False, help="uses reward shaping")
+parser.add_argument("--live_plot", action="store_true", default=False, help="plots evaluation performance")
+parser.add_argument("--evaluate", action="store_true", default=False, help="evaluates selected model")
 
 
 
@@ -40,7 +45,7 @@ class TrajectoryBuffer:
         self.action_probs = []
         self.rewards = []
         self.dones = []
-        self.values = []
+        # self.values = []
         self.last_next_states = None
         self.prev_dones = None
         
@@ -51,7 +56,7 @@ class TrajectoryBuffer:
         actions_probs: np.ndarray,
         rewards: np.ndarray,
         dones: np.ndarray,
-        values: np.ndarray,
+        # values: np.ndarray,
         next_states: np.ndarray,
         prev_dones: np.ndarray
     ) -> None:
@@ -60,7 +65,7 @@ class TrajectoryBuffer:
         self.action_probs.append(actions_probs)
         self.rewards.append(rewards)
         self.dones.append(dones)
-        self.values.append(values)
+        # self.values.append(values)
         self.last_next_states = next_states
         if self.prev_dones is None:
             self.prev_dones = prev_dones
@@ -71,7 +76,7 @@ class TrajectoryBuffer:
         self.action_probs.clear()
         self.rewards.clear()
         self.dones.clear()
-        self.values.clear()
+        # self.values.clear()
         self.last_next_states = None
         self.prev_dones = None
 
@@ -88,7 +93,7 @@ class TrajectoryBuffer:
 
 
 def torch_init_with_orthogonal_and_zeros(module):
-    """Initialize weights of a PyTorch module with Xavier and zeros initializers."""
+    """Initialize weights of a PyTorch module with orthogonal and zeros initializers."""
     if isinstance(module, (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d,
                            torch.nn.ConvTranspose1d, torch.nn.ConvTranspose2d, torch.nn.ConvTranspose3d)):
         torch.nn.init.orthogonal_(module.weight)
@@ -99,10 +104,10 @@ def torch_init_with_orthogonal_and_zeros(module):
 class ReshapeLayer(torch.nn.Module):
     def __init__(self, shape: tuple[int, ...]):
         super().__init__()
-        self._shape = shape
+        self._shape = (-1, *shape)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.reshape(-1, *self._shape)
+        return x.reshape(self._shape)
 
 
 
@@ -141,8 +146,8 @@ class Agent:
             args.hidden_size
         ).to(self.device)
         self._actor.apply(torch_init_with_orthogonal_and_zeros)
-        # with torch.no_grad():
-            # self._actor[-2].weight.mul_(0.01)
+        with torch.no_grad():
+            self._actor[-2].weight.mul_(0.01)
 
         self._critic = new_network(
             env.observation_space.shape[0],  # type: ignore
@@ -176,6 +181,10 @@ class Agent:
         data = buffer.states, buffer.actions, buffer.action_probs, advantages, returns
         prev_dones = buffer.get_prev_dones()
 
+        # print("trajectory states", np.array(data[0]).shape)
+        # print(prev_dones.shape, "valid transitions:", np.count_nonzero(~prev_dones))
+        # print("total rew:", np.sum(buffer.rewards))
+
         # print()
         # print("rewards", np.array(buffer.rewards)[:, 0])
         # print("returns", returns[:, 0])
@@ -200,9 +209,9 @@ class Agent:
         for epoch in range(epochs):
             data = self._prepare_data(buffer)
             data_size = len(data[0])
-            for d in data:
-                print(d.shape)
-            exit()
+            # for d in data:
+                # print(d.shape)
+            # exit()
             
             indices = np.random.permutation(data_size)
             for b in range(0, data_size - batch_size + 1, batch_size):
@@ -223,7 +232,7 @@ class Agent:
         t_advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
         t_returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-        t_advantages = (t_advantages - t_advantages.mean()) / (t_advantages.std() + 1e-8)
+        # t_advantages = (t_advantages - t_advantages.mean()) / (t_advantages.std() + 1e-8)
 
         self._actor.train()
         self._critic.train()
@@ -247,9 +256,15 @@ class Agent:
 
         self._opt.zero_grad()
         loss.backward()
-        # torch.nn.utils.clip_grad_norm_(self._params, self._clip_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self._params, self._clip_grad_norm)
         with torch.no_grad():
             self._opt.step()
+
+    def save(self, path: str) -> None:
+        torch.save(self._actor.state_dict(), path)
+
+    def load(self, path: str) -> None:
+        self._actor.load_state_dict(torch.load(path, map_location=Agent.device))
 
 
 
@@ -262,14 +277,21 @@ def compute_gae_and_ret(
     gaes = np.empty_like(buffer.rewards)
     returns = np.empty_like(buffer.rewards)
 
-    values_ext = agent.predict_values(buffer.extended_states())
+    ext_states = buffer.extended_states()
+    T, E, S = ext_states.shape
+
+    values_ext = agent.predict_values(ext_states.reshape(-1, S)).reshape(T, E)
     values = values_ext[:-1]
     v_last = values_ext[-1]
+    # print("exs", buffer.extended_states().shape)
+    # print(values_ext.shape, values.shape, v_last.shape)
+    # exit()
 
     gae = 0
     v_next = v_last
     for t in range(len(gaes) - 1, -1, -1):
         v = values[t]
+        # print("v", v.shape)
 
         adv = buffer.rewards[t] + ~buffer.dones[t] * gamma * v_next - v
         # print(f"[{t}] adv = {adv[0]} = {buffer.rewards[t][0]} + {~buffer.dones[t][0]} * {gamma} * {v_next[0]} - {v[0]}")
@@ -277,13 +299,15 @@ def compute_gae_and_ret(
 
         gaes[t] = gae
         returns[t] = gae + v
-        print(f"[{t}] ret = {(gae + v)}")
+        # print(returns[t].shape, "=", gae.shape, "+", v.shape)
+        # print(f"[{t}] ret = {(gae + v)}")
 
         # if buffer.dones[t][0] and buffer.rewards[t][0] == 0 and t < args.ep_limit - 1:
             # print(buffer.states[t][0].reshape(2, -1))
             # print(buffer.states[t + 1][0].reshape(2, -1))
 
         v_next = v
+    # exit()
     return gaes, returns
 
 
@@ -315,23 +339,26 @@ def evaluate_episode(agent: Agent, env: gym.Env, render: bool) -> float:
 
     while not done:
         # steps += 1
-        probs = agent.predict_probs(state[None])[0]
-        # print(probs)
+        # print(state.shape)
+        probs = agent.predict_probs(state)[0]
         action = probs.argmax(-1)
+        # print(probs.shape)
+        # print(action.shape)
+        # exit()
 
-        row = state.reshape(2, -1)[1][:args.env_size].argmax()
-        col = state.reshape(2, -1)[1][args.env_size : args.env_size * 2].argmax()
-        up = row == 0
-        down = row == args.env_size - 1
-        left = col == 0
-        right = col == args.env_size - 1
-        in_corner = (up or down) and (left or right)
+        # row = state.reshape(2, -1)[1][:args.env_size].argmax()
+        # col = state.reshape(2, -1)[1][args.env_size : args.env_size * 2].argmax()
+        # up = row == 0
+        # down = row == args.env_size - 1
+        # left = col == 0
+        # right = col == args.env_size - 1
+        # in_corner = (up or down) and (left or right)
 
-        if in_corner:
-            a = 2 if up else 1
-        else:
-            a = 5
-        action =  np.full(args.players, a)
+        # if in_corner:
+            # a = 2 if up else 1
+        # else:
+            # a = 5
+        # action =  np.full(args.players, a)
 
         state, reward, terminated, truncated, _ = env.step(action)
         ret += float(reward)
@@ -352,15 +379,34 @@ def evaluate(agent: Agent, env: gym.Env, episodes: int, render_each: int) -> flo
     mean_ret /= episodes
     return mean_ret
 
+def new_env_with_wrappers(args: argparse.Namespace, eval: bool = False) -> gym.Env:
+    """gym.make might have something better than this function"""
+    env = gym.make("LBF")
+    env = wrappers.NpWrapper(env, args)
+    if args.reward_shaping and not eval:
+        assert not args.three_hot, "Reward shaping does not support 3-hot states!"
+        env = wrappers.RewardShapingWrapper(env, args)
+    if args.live_plot and eval:
+        env = wrappers.LivePlotWrapper(env, args.eval_for)
+    return env
+
 def main(args: argparse.Namespace) -> None:
-    eval_env = gym.make("LBF")
+    eval_env = new_env_with_wrappers(args, True)
+    agent = Agent(args, eval_env)
+
+    if args.evaluate:
+        agent.load(args.model)
+        while True:
+            mean_return = evaluate(agent, eval_env, args.eval_for, args.render_each)
+            print(f"Mean {args.eval_for} return: {mean_return:.3f}")
+        return
+
     train_env = gym.vector.AsyncVectorEnv(
-        [lambda: gym.make("LBF") for _ in range(args.num_envs)]
+        [lambda: new_env_with_wrappers(args) for _ in range(args.num_envs)]
     )
 
-    agent = Agent(args, eval_env)
-    buffer = TrajectoryBuffer()
 
+    buffer = TrajectoryBuffer()
     states = train_env.reset()[0]
 
     prev_dones = np.zeros(train_env.num_envs, dtype=bool)
@@ -392,10 +438,10 @@ def main(args: argparse.Namespace) -> None:
             next_states, rewards, terminations, truncations, _ = train_env.step(actions)
 
             dones = terminations | truncations
-            values = agent.predict_values(states)
+            # values = agent.predict_values(states)
             actions_probs = np.take_along_axis(probs, actions[..., None], axis=-1).squeeze(-1).prod(-1)
 
-            buffer.append(states, actions, actions_probs, rewards, dones, values, next_states, prev_dones)
+            buffer.append(states, actions, actions_probs, rewards, dones, next_states, prev_dones)
 
 
 
@@ -410,20 +456,22 @@ def main(args: argparse.Namespace) -> None:
             print(f"Evaluation after {train_step} steps: ", end="", flush=True)
             mean_return = evaluate(agent, eval_env, args.eval_for, args.render_each)
             print(f"{mean_return:.3f}")
+    agent.save(args.model)
 
 
 
-# python main.py --env_size 8 --players 2 --foods 3 --steps_per_update 10 --batch_size 10 --tau 0.01 --lr 3e-4 --epochs 4 --hidden_size 128 --entropy_reg 0.001 --clip_eps 0.2 --num_envs 10 --eval_each 1000 --eval_for 10
+# python main.py --entropy_reg 0.01 --lr 0.001 --players 2 --env_size 7 --foods 3 --hidden_size 128 --ep_limit 32 --steps_per_update 16 --batch_size 32
+
 if __name__ == "__main__":
     args = parser.parse_args()
     gym.register(
         id="LBF",
         entry_point="lbforaging.foraging:ForagingEnv",
         disable_env_checker=True,
-        additional_wrappers=(
-            wrappers.NpWrapper.wrapper_spec(args=args),
-            # wrappers.RewardShapingWrapper.wrapper_spec(args=args)
-        ),
+        # additional_wrappers=(
+            # wrappers.NpWrapper.wrapper_spec(args=args),
+            # *([wrappers.RewardShapingWrapper.wrapper_spec(args=args)] if args.reward_shaping else []),
+        # ),
         kwargs={
             "players": args.players,
             "min_player_level": np.ones(args.players),
