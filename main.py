@@ -239,7 +239,7 @@ class Agent:
 
         logits = self._actor(t_states)
         probs = logits.softmax(-1)
-        new_actions_probs = torch.take_along_dim(probs, t_actions[..., None], dim=-1).squeeze().prod(-1)
+        new_actions_probs = torch.take_along_dim(probs, t_actions[..., None], dim=-1).squeeze(-1).prod(-1)
         rho = new_actions_probs / (t_actions_probs + 1e-8)
         # rho = probs[range(len(t_states)), t_actions] / (actions_probs + 1e-8)
         # rho = rho / rho.max()
@@ -250,7 +250,7 @@ class Agent:
         ).mean()
 
         entropy = torch.distributions.Categorical(logits=logits).entropy().mean()  # todo: ugly and wrong
-        critic_loss = self._critic_loss(self._critic(t_states).squeeze(), t_returns)
+        critic_loss = self._critic_loss(self._critic(t_states).squeeze(-1), t_returns)
         
         loss = critic_loss + ppo_loss - entropy * self._entropy_reg
 
@@ -334,42 +334,15 @@ def evaluate_episode(agent: Agent, env: gym.Env, render: bool) -> float:
     done = False
     ret = 0
 
-    # steps = 0
-    # food = state
-
     while not done:
-        # steps += 1
-        # print(state.shape)
         probs = agent.predict_probs(state)[0]
         action = probs.argmax(-1)
-        # print(probs.shape)
-        # print(action.shape)
-        # exit()
-
-        # row = state.reshape(2, -1)[1][:args.env_size].argmax()
-        # col = state.reshape(2, -1)[1][args.env_size : args.env_size * 2].argmax()
-        # up = row == 0
-        # down = row == args.env_size - 1
-        # left = col == 0
-        # right = col == args.env_size - 1
-        # in_corner = (up or down) and (left or right)
-
-        # if in_corner:
-            # a = 2 if up else 1
-        # else:
-            # a = 5
-        # action =  np.full(args.players, a)
 
         state, reward, terminated, truncated, _ = env.step(action)
         ret += float(reward)
-        # print(probs, reward)
         done = terminated or truncated
 
         _render()
-        # print(action)
-        # print(state.reshape(-1, 3))
-        # input()
-    # print(f"steps: {steps}, return: {ret}, {food}")
     return ret
 
 def evaluate(agent: Agent, env: gym.Env, episodes: int, render_each: int) -> float:
