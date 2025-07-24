@@ -8,7 +8,7 @@ import time
 import wrappers
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", type=str, default="model", help="path to the model file")
+parser.add_argument("--model", type=str, default="checkpoints/model", help="path to the model file")
 parser.add_argument("--hidden_size", type=int, default=0, help="size of hidden layer")
 parser.add_argument("--num_envs", type=int, default=8, help="number of parallel training envs")
 parser.add_argument("--ep_limit", type=int, default=3, help="number of parallel training envs")
