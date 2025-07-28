@@ -10,28 +10,29 @@ import wrappers
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default="checkpoints/model", help="path to the model file")
 parser.add_argument("--hidden_size", type=int, default=0, help="size of hidden layer")
+parser.add_argument("--critic_layers", type=int, default=1, help="number of critic's hidden layer")
 parser.add_argument("--num_envs", type=int, default=8, help="number of parallel training envs")
-parser.add_argument("--ep_limit", type=int, default=3, help="number of parallel training envs")
+parser.add_argument("--ep_limit", type=int, default=32, help="maximum number of moves per episode")
 parser.add_argument("--eval_each", type=int, default=1000, help="evaluation period")
 parser.add_argument("--eval_for", type=int, default=100, help="number of eval_episodes")
-parser.add_argument("--render_each", type=int, default=50, help="render eval eps")
+parser.add_argument("--render_each", type=int, default=50, help="render eval episodes frequency")
 
 parser.add_argument("--env_size", type=int, default=3, help="size of the envirnonment")
 parser.add_argument("--players", type=int, default=1, help="number of players")
-parser.add_argument("--foods", type=int, default=1, help="number of players")
+parser.add_argument("--foods", type=int, default=1, help="number of foods")
 
-parser.add_argument("--train_steps", type=int, default=1_000_000, help="number of training steps")
-parser.add_argument("--steps_per_update", type=int, default=10, help="number of steps in the env per update")
-parser.add_argument("--batch_size", type=int, default=16, help="size of a single batch")
-parser.add_argument("--epochs", type=int, default=2, help="number of epochs per training")
+parser.add_argument("--train_steps", type=int, default=1_000, help="number of training steps")
+parser.add_argument("--steps_per_update", type=int, default=2048, help="number of steps in the env per update")
+parser.add_argument("--batch_size", type=int, default=64, help="size of a single batch")
+parser.add_argument("--epochs", type=int, default=4, help="number of epochs per training")
 parser.add_argument("--lr", type=float, default=0.0003, help="learning rate")
 parser.add_argument("--gamma", type=float, default=0.99, help="number of steps in the env per update")
 parser.add_argument("--lambd", type=float, default=0.95, help="gae trace lambda")
-parser.add_argument("--clip_eps", type=float, default=0.25, help="ppo clip")
+parser.add_argument("--clip_eps", type=float, default=0.2, help="ppo clip")
 parser.add_argument("--entropy_reg", type=float, default=0.001, help="entropy regularization")
 parser.add_argument("--clip_grad_norm", type=float, default=10., help="gradient clipping")
 
-parser.add_argument("--three_hot", action="store_true", default=False, help="uses three-hot states")
+parser.add_argument("--one_hot", action="store_true", default=False, help="uses one-hot states")
 parser.add_argument("--reward_shaping", action="store_true", default=False, help="uses reward shaping")
 parser.add_argument("--live_plot", action="store_true", default=False, help="plots evaluation performance")
 parser.add_argument("--evaluate", action="store_true", default=False, help="evaluates selected model")
@@ -111,10 +112,10 @@ class ReshapeLayer(torch.nn.Module):
 
 
 
-def new_network(in_features: int, out_shape: tuple[int, ...], hidden_size: int) -> torch.nn.Sequential:
+def new_network(in_features: int, out_shape: tuple[int, ...], hidden_size: int, hidden_layers: int = 1) -> torch.nn.Sequential:
     out_features = np.prod(out_shape).item()  # 6 actions per player
 
-    if hidden_size == 0:
+    if hidden_size == 0 or hidden_layers < 1:
         network = torch.nn.Sequential(
             torch.nn.Linear(in_features, out_features),
             ReshapeLayer(out_shape)
@@ -123,6 +124,12 @@ def new_network(in_features: int, out_shape: tuple[int, ...], hidden_size: int) 
         network = torch.nn.Sequential(
             torch.nn.Linear(in_features, args.hidden_size),
             torch.nn.ReLU(),
+            *[
+                torch.nn.Sequential(
+                    torch.nn.Linear(args.hidden_size, args.hidden_size),
+                    torch.nn.ReLU()
+                ) for _ in range(hidden_layers - 1)
+            ],
             torch.nn.Linear(hidden_size, out_features),
             ReshapeLayer(out_shape)
         )
@@ -153,7 +160,8 @@ class Agent:
             env.observation_space.shape[0],  # type: ignore
             # 3 * (args.players + args.foods),
             (1,),
-            args.hidden_size
+            args.hidden_size,
+            hidden_layers=args.critic_layers
         ).to(self.device)
         self._critic.apply(torch_init_with_orthogonal_and_zeros)
 
@@ -357,7 +365,7 @@ def new_env_with_wrappers(args: argparse.Namespace, eval: bool = False) -> gym.E
     env = gym.make("LBF")
     env = wrappers.NpWrapper(env, args)
     if args.reward_shaping and not eval:
-        assert not args.three_hot, "Reward shaping does not support 3-hot states!"
+        assert not args.one_hot, "Reward shaping does not support one-hot states!"
         env = wrappers.RewardShapingWrapper(env, args)
     if args.live_plot and eval:
         env = wrappers.LivePlotWrapper(env, args.eval_for)
@@ -430,6 +438,8 @@ def main(args: argparse.Namespace) -> None:
             mean_return = evaluate(agent, eval_env, args.eval_for, args.render_each)
             print(f"{mean_return:.3f}")
     agent.save(args.model)
+    if args.live_plot:
+        eval_env.save_figure("logs/" + args.model.split("/")[-1] + ".png")
 
 
 

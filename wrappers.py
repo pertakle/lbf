@@ -6,7 +6,7 @@ class RewardShapingWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
     def __init__(self, env, args):
         gym.utils.RecordConstructorArgs.__init__(self)
         super().__init__(env)
-        assert not args.three_hot
+        assert not args.one_hot
         self._args = args
         self._last_distances = np.zeros(args.players + args.foods)
 
@@ -44,8 +44,8 @@ class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
         super().__init__(env)
         self._args = args
 
-        if args.three_hot:
-            # 3-hot
+        if args.one_hot:
+            # one-hot
             self._observation_space = gym.spaces.MultiBinary(
                 [(self._args.players + self._args.foods) * (self._args.env_size * 2 + self._args.players + 1)]
             )
@@ -74,9 +74,9 @@ class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
         new_obs = np.concat([padded_foods, positions], axis=0)
         return new_obs
 
-    def _three_hot_observation(self, obs: np.ndarray) -> np.ndarray:
-        """Makes three-hot reprezentation.
-        Transforms each value in the tripplet into one-hot encoding.
+    def _one_hot_observation(self, obs: np.ndarray) -> np.ndarray:
+        """Makes one-hot reprezentation.
+        Transforms each value in the tripplets into one-hot encoding.
 
         Returns: ndarray, ((foods + players), (env_size * 2 + players))
         """
@@ -91,8 +91,8 @@ class NpWrapper(gym.Wrapper, gym.utils.RecordConstructorArgs):
     def observation(self, obs):
         new_obs = self._full_observation_tripples(obs)
 
-        if self._args.three_hot:
-            new_obs = self._three_hot_observation(new_obs)
+        if self._args.one_hot:
+            new_obs = self._one_hot_observation(new_obs)
         else:
             # normalization
             new_obs = new_obs.astype(np.float64)
