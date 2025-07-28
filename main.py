@@ -13,7 +13,7 @@ parser.add_argument("--hidden_size", type=int, default=0, help="size of hidden l
 parser.add_argument("--critic_layers", type=int, default=1, help="number of critic's hidden layer")
 parser.add_argument("--num_envs", type=int, default=8, help="number of parallel training envs")
 parser.add_argument("--ep_limit", type=int, default=32, help="maximum number of moves per episode")
-parser.add_argument("--eval_each", type=int, default=1000, help="evaluation period")
+parser.add_argument("--eval_each", type=int, default=10, help="evaluation period")
 parser.add_argument("--eval_for", type=int, default=100, help="number of eval_episodes")
 parser.add_argument("--render_each", type=int, default=50, help="render eval episodes frequency")
 
@@ -21,7 +21,7 @@ parser.add_argument("--env_size", type=int, default=3, help="size of the envirno
 parser.add_argument("--players", type=int, default=1, help="number of players")
 parser.add_argument("--foods", type=int, default=1, help="number of foods")
 
-parser.add_argument("--train_steps", type=int, default=1_000, help="number of training steps")
+parser.add_argument("--train_steps", type=int, default=5_000, help="number of training steps")
 parser.add_argument("--steps_per_update", type=int, default=2048, help="number of steps in the env per update")
 parser.add_argument("--batch_size", type=int, default=64, help="size of a single batch")
 parser.add_argument("--epochs", type=int, default=4, help="number of epochs per training")

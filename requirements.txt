@@ -1,6 +1,6 @@
 numpy==2.3.0
-torch==2.7.1+cu118
+torch==2.7.1
 lbforaging==2.0.0
 matplotlib==3.10.3
-pyqt6
+pyqt6==6.9.1
 
